@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chest X-Ray Classifier</title>
+<style>
+  :root { --bg:#0d1017; --card:#161a23; --accent:#5b8cff; --ok:#36c08a; --warn:#ffb84d; --bad:#ff5a5a; --text:#e6e8ec; --muted:#9aa0aa; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); min-height:100vh; padding:40px 16px; }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { font-weight:650; font-size:1.7rem; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 10px; font-size:.92rem; }
+  .disc { background:rgba(255,184,77,.1); border:1px solid rgba(255,184,77,.3); color:var(--warn);
+          font-size:.8rem; padding:10px 14px; border-radius:9px; margin-bottom:24px; line-height:1.45; }
+  .card { background:var(--card); border:1px solid #232833; border-radius:14px; padding:24px; margin-bottom:20px; }
+  .drop { border:2px dashed #39414f; border-radius:12px; padding:40px 20px; text-align:center; cursor:pointer; transition:.15s; }
+  .drop:hover, .drop.over { border-color:var(--accent); background:#11141a; }
+  .drop p { margin:6px 0; color:var(--muted); }
+  input[type=file] { display:none; }
+  button { background:var(--accent); color:#fff; border:0; padding:11px 22px; border-radius:9px; font-size:.95rem; cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  .verdict { display:flex; align-items:center; gap:12px; font-size:1.25rem; font-weight:650; margin-bottom:14px; }
+  .pill { padding:3px 12px; border-radius:999px; font-size:.85rem; font-weight:600; }
+  .pill.ok { background:rgba(54,192,138,.16); color:var(--ok); }
+  .pill.bad { background:rgba(255,90,90,.16); color:var(--bad); }
+  .bars { margin:0 0 20px; }
+  .bar-row { display:flex; align-items:center; gap:10px; margin-bottom:8px; font-size:.88rem; }
+  .bar-label { width:90px; color:var(--muted); }
+  .bar-track { flex:1; background:#11141a; border-radius:6px; height:16px; overflow:hidden; }
+  .bar-fill { height:100%; background:var(--accent); border-radius:6px; transition:width .4s; }
+  .bar-val { width:56px; text-align:right; font-variant-numeric:tabular-nums; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; }
+  .imgbox { background:#11141a; border:1px solid #232833; border-radius:10px; padding:10px; }
+  .imgbox h3 { margin:0 0 8px; font-size:.85rem; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .imgbox img { width:100%; border-radius:6px; display:block; }
+  .note { font-size:.8rem; color:var(--muted); margin-top:14px; line-height:1.5; }
+  .spinner { display:none; margin:16px auto; width:28px; height:28px; border:3px solid #333; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .err { color:var(--bad); font-size:.9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Chest X-Ray Classifier</h1>
+  <p class="sub">Upload a chest X-ray. A PyTorch CNN classifies it as COVID-19, Normal, or Pneumonia, and shows which regions drove the decision.</p>
+  <div class="disc">⚠️ Educational demo only — not a diagnostic tool. Models trained on public COVID X-ray datasets can exploit dataset artifacts rather than true pathology. Never use for medical decisions.</div>
+
+  <div class="card">
+    <label class="drop" id="drop">
+      <p style="font-size:1.4rem;">🫁</p>
+      <p><strong>Click to choose</strong> or drag an X-ray here</p>
+      <p style="font-size:.8rem;">JPG / PNG</p>
+      <input type="file" id="file" accept="image/*">
+    </label>
+    <div style="text-align:center; margin-top:16px;">
+      <button id="go" disabled>Analyze</button>
+    </div>
+    <div class="spinner" id="spin"></div>
+    <div id="err" class="err"></div>
+  </div>
+
+  <div class="card" id="result" style="display:none;">
+    <div class="verdict">
+      <span id="verdict-text"></span>
+      <span class="pill" id="verdict-pill"></span>
+    </div>
+    <div class="bars" id="bars"></div>
+    <div class="grid" id="grid"></div>
+    <p class="note" id="note"></p>
+  </div>
+</div>
+
+<script>
+// >>> EDIT THIS ONE LINE: paste your deployed lung Space URL <<<
+const API = "https://huggingface.co/spaces/HackZac/lung-xray-api";
+
+const drop = document.getElementById('drop');
+const file = document.getElementById('file');
+const go = document.getElementById('go');
+const spin = document.getElementById('spin');
+const errBox = document.getElementById('err');
+const result = document.getElementById('result');
+let chosen = null;
+
+['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { if (ev.dataTransfer.files.length) { file.files = ev.dataTransfer.files; pick(); } });
+file.addEventListener('change', pick);
+
+function pick() {
+  if (file.files.length) {
+    chosen = file.files[0];
+    drop.querySelector('strong').textContent = chosen.name;
+    go.disabled = false;
+  }
+}
+
+go.addEventListener('click', async () => {
+  if (!chosen) return;
+  const api = API.replace(/\/$/, '');
+  if (!api || api === "https://your-lung-space.hf.space") { errBox.textContent = 'API URL not configured.'; return; }
+  errBox.textContent = '';
+  result.style.display = 'none';
+  spin.style.display = 'block';
+  go.disabled = true;
+
+  const fd = new FormData();
+  fd.append('image', chosen);
+  try {
+    const resp = await fetch(api + '/predict', { method:'POST', body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Request failed');
+    render(data);
+  } catch (e) {
+    errBox.textContent = 'Error: ' + e.message + ' (the API may be waking up — try again in ~30s)';
+  } finally {
+    spin.style.display = 'none';
+    go.disabled = false;
+  }
+});
+
+function imgCard(title, src) {
+  return `<div class="imgbox"><h3>${title}</h3><img src="${src}"></div>`;
+}
+
+function render(d) {
+  const vt = document.getElementById('verdict-text');
+  const pill = document.getElementById('verdict-pill');
+  const bars = document.getElementById('bars');
+  const grid = document.getElementById('grid');
+  const note = document.getElementById('note');
+
+  vt.textContent = 'Predicted: ' + d.label_text;
+  if (d.is_abnormal) { pill.textContent = 'ABNORMAL'; pill.className = 'pill bad'; }
+  else { pill.textContent = 'NORMAL'; pill.className = 'pill ok'; }
+
+  // probability bars (sorted high to low)
+  const entries = Object.entries(d.probabilities).sort((a,b) => b[1]-a[1]);
+  bars.innerHTML = entries.map(([name, p]) => {
+    const pct = (p*100).toFixed(1);
+    return `<div class="bar-row">
+      <span class="bar-label">${name}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span>
+      <span class="bar-val">${pct}%</span>
+    </div>`;
+  }).join('');
+
+  let cards = imgCard('Uploaded X-ray', d.original);
+  if (d.heatmap) cards += imgCard('Grad-CAM (model attention)', d.heatmap);
+  grid.innerHTML = cards;
+
+  note.textContent = 'The heatmap shows which regions most influenced the prediction. Use it to sanity-check the model is attending to lung fields rather than text, borders, or other artifacts — a known failure mode for this kind of dataset.';
+  result.style.display = 'block';
+}
+</script>
+</body>
+</html>
